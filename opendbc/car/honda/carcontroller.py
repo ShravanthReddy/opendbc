@@ -150,9 +150,14 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     self.bosch_last_gas = 0
 
     self.gasfactor = 1.0 if (Params().get("HondaGasFactorParams") is None) else Params().get("HondaGasFactorParams")
-    self.gasfactor_before_maxgas = self.gasfactor
     self.windfactor = 1.0 if (Params().get("HondaWindFactorParams") is None) else Params().get("HondaWindFactorParams")
-    self.windfactor_before_maxgas = self.windfactor_before_brake = self.windfactor
+    if CP.carFingerprint == CAR.HONDA_ACCORD_11G:
+      # start from neutral each drive: stored factors may have been learned
+      # against the generic gas map, which doesn't fit this powertrain
+      self.gasfactor = 1.0
+      self.windfactor = 1.0
+    self.gasfactor_before_gasmax = self.gasfactor
+    self.windfactor_before_gasmax = self.windfactor_before_brake = self.windfactor
     self.pitch = 0.0
 
     # Bosch extra-brake controller
@@ -300,6 +305,8 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
               if self.CP.carFingerprint in (CAR.HONDA_INSIGHT, CAR.HONDA_CIVIC_BOSCH): # gas pedal reacts too slowly
                 learn_speed = 150.0
               elif self.CP.carFingerprint in (CAR.ACURA_RDX_3G, CAR.ACURA_RDX_3G_MMR): # Prevent overreacting to turbo lag
+                learn_speed = 300.0
+              elif self.CP.carFingerprint == CAR.HONDA_ACCORD_11G: # Prevent overreacting to CVT/hybrid powertrain lag
                 learn_speed = 300.0
               else:
                 learn_speed = 50.0
