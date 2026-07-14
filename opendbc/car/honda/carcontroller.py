@@ -146,16 +146,19 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     self.speed = 0.0
     self.gas = 0.0
     self.brake = 0.0
+    self.last_targetaccel = 0.0
     self.last_torque = 0.0
     self.bosch_last_gas = 0
 
     self.gasfactor = 1.0 if (Params().get("HondaGasFactorParams") is None) else Params().get("HondaGasFactorParams")
     self.windfactor = 1.0 if (Params().get("HondaWindFactorParams") is None) else Params().get("HondaWindFactorParams")
     if CP.carFingerprint == CAR.HONDA_ACCORD_11G:
-      # start from neutral each drive: stored factors may have been learned
-      # against the generic gas map, which doesn't fit this powertrain
-      self.gasfactor = 1.0
-      self.windfactor = 1.0
+      # trust stored factors only inside a sane band: values outside it were
+      # learned by the old fast learner chasing powertrain lag, not physics
+      if not (0.6 <= self.gasfactor <= 1.6):
+        self.gasfactor = 1.0
+      if not (0.5 <= self.windfactor <= 2.0):
+        self.windfactor = 1.0
     self.gasfactor_before_gasmax = self.gasfactor
     self.windfactor_before_gasmax = self.windfactor_before_brake = self.windfactor
     self.pitch = 0.0
@@ -285,11 +288,19 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
 
         if self.CP.carFingerprint in HONDA_BOSCH:
           if (accel < min_gas) and (CS.out.vEgo > 1e-3):
-            brake_addon = self.brake_pid.update(error = accel - CS.out.aEgo, speed = CS.out.vEgo)
+            brake_error = accel - CS.out.aEgo
+            if abs(brake_error) < 0.1:  # deadband: don't wind up on noise-level tracking error
+              brake_error = 0.0
+            brake_addon = self.brake_pid.update(error = brake_error, speed = CS.out.vEgo)
             targetaccel = min(accel,accel + brake_addon)
           else:
             self.brake_pid.reset()
             targetaccel = accel
+
+          # jerk-limit the release: don't let commanded accel rise faster than 3 m/s^3,
+          # so stacked brake_pid output bleeds off instead of vanishing in one frame
+          targetaccel = min(targetaccel, self.last_targetaccel + 0.06)
+          self.last_targetaccel = targetaccel if CC.longActive else 0.0
 
           self.accel = float(np.clip(targetaccel, self.params.BOSCH_ACCEL_MIN, self.params.BOSCH_ACCEL_MAX))
           gas_pedal_force = accel + wind_brake_ms2 * self.windfactor + hill_brake # not using self.accel since pid resets w gas pedal
