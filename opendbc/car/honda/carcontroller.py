@@ -287,7 +287,7 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
         ts = self.frame * DT_CTRL
 
         if self.CP.carFingerprint in HONDA_BOSCH:
-          if (accel < min_gas) and (CS.out.vEgo > 1e-3):
+          if (accel < min_gas) and (1e-3 < CS.out.vEgo < 3.0):  # MVL: brake_pid only near-stop (<3 m/s)
             brake_error = accel - CS.out.aEgo
             if abs(brake_error) < 0.1:  # deadband: don't wind up on noise-level tracking error
               brake_error = 0.0
