@@ -14,6 +14,7 @@ INACTIVE_OBJECT = {
 
 LEAD_PROBABILITY_MIN = 0.5
 LEAD_OBJECT_ID = 1
+# Honda HUD object classification: 7=car, 6=motorcycle, -7=truck.
 CAR_TYPE_CAR = 7
 LONG_DISTANCE_MAX = 194.0
 LATERAL_DISTANCE_MAX = 204.7

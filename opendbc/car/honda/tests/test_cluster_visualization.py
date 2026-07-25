@@ -73,10 +73,14 @@ class TestAccordClusterVisualization(unittest.TestCase):
     self.parser.update([0, [slot_zero]])
     self.assertEqual(self.parser.vl["HUD_OBJECTS"]["OBJECT_ID"], 1)
     self.assertEqual(self.parser.vl["HUD_OBJECTS"]["IS_LEAD_CAR"], 1)
+    self.assertEqual(self.parser.vl["HUD_OBJECTS"]["CAR_TYPE"], 7)
     self.parser.update([0, [slot_one]])
     self.assertEqual(self.parser.vl["HUD_OBJECTS"]["OBJECT_ID"], 0)
+    self.assertEqual(self.parser.vl["HUD_OBJECTS"]["IS_LEAD_CAR"], 0)
     self.assertEqual(self.parser.vl["HUD_OBJECTS"]["CAR_TYPE"], -1)
     self.assertEqual(self.parser.vl["HUD_OBJECTS"]["ROTATION"], -128)
+    self.assertAlmostEqual(self.parser.vl["HUD_OBJECTS"]["LONG_DIST"], 196.9, delta=0.01)
+    self.assertAlmostEqual(self.parser.vl["HUD_OBJECTS"]["LAT_DIST"], 204.7)
 
   def test_lkas_state_change_pulse(self):
     pulse = lane_path.LkasStateChangePulse()
@@ -100,7 +104,10 @@ class TestAccordClusterVisualization(unittest.TestCase):
     self.assertEqual(self.parser.vl["LANE_PATH"]["PATH_OFFSET_3"], 2047)
     self.assertEqual(self.parser.vl["HUD_OBJECTS"]["OBJECT_ID"], 4)
     self.assertEqual(self.parser.vl["HUD_OBJECTS"]["IS_LEAD_CAR"], 1)
+    self.assertEqual(self.parser.vl["HUD_OBJECTS"]["CAR_TYPE"], -7)
+    self.assertEqual(self.parser.vl["HUD_OBJECTS"]["ROTATION"], 0)
     self.assertAlmostEqual(self.parser.vl["HUD_OBJECTS"]["LONG_DIST"], 77.15)
+    self.assertAlmostEqual(self.parser.vl["HUD_OBJECTS"]["LAT_DIST"], 0.4)
     self.assertEqual(self.parser.vl["RADAR_LEAD"]["LANE_PATH_LENGTH"], 30)
 
   def test_startup_only_radar_lead_does_not_become_alive_requirement(self):
