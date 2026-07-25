@@ -8,6 +8,7 @@ from openpilot.common.params import Params
 from opendbc.can import CANPacker
 from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, Bus, DT_CTRL, rate_limit, make_tester_present_msg, structs
 from opendbc.car.honda import hondacan
+from opendbc.car.honda import hud_objects, lane_path
 from opendbc.car.honda.values import CAR, CruiseButtons, HONDA_BOSCH, HONDA_BOSCH_CANFD, HONDA_BOSCH_RADARLESS, \
                                      HONDA_BOSCH_TJA_CONTROL, HONDA_NIDEC_ALT_PCM_ACCEL, CarControllerParams, HondaFlags
 from opendbc.car.interfaces import CarControllerBase
@@ -134,6 +135,12 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     self.CAN = hondacan.CanBus(CP)
     self.tja_control = CP.carFingerprint in HONDA_BOSCH_TJA_CONTROL
     self.param_writer = HondaParamWriter()
+    self.params_store = Params()
+    self.cluster_visualization_enabled = False
+    self.dash_lane = lane_path.blank_dash_lane()
+    self.lane_path_fitter = lane_path.LanePathFitter()
+    self.cluster_lead = hud_objects.no_lead()
+    self.lkas_state_change_pulse = lane_path.LkasStateChangePulse()
 
     self.braking = False
     self.brake_steady = 0.
@@ -223,10 +230,41 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     # Send CAN commands
     can_sends = []
 
+    if self.frame % 100 == 0:
+      self.cluster_visualization_enabled = self.params_store.get_bool("AccordClusterVisualization")
+    accord_cluster_visualization = (
+      self.cluster_visualization_enabled
+      and self.CP.carFingerprint == CAR.HONDA_ACCORD_11G
+      and self.CP.openpilotLongitudinalControl
+    )
+
     # tester present - w/ no response (keeps radar disabled)
     if self.CP.carFingerprint in (HONDA_BOSCH - HONDA_BOSCH_RADARLESS) and self.CP.openpilotLongitudinalControl:
       if self.frame % 10 == 0:
         can_sends.append(make_tester_present_msg(0x18DAB0F1, self.CAN.pt, suppress_response=True))
+
+    if accord_cluster_visualization:
+      # These are the stock-radar display frames captured on this exact Accord.
+      # They are intentionally sent only on bus 0 in the first release; bus 2
+      # reaches the camera ECU and is excluded until its consumers are proven.
+      if self.frame % 2 == 0:
+        self.cluster_lead = hud_objects.lead_from_model(self.model)
+        lead_distance = self.cluster_lead.d_rel if self.cluster_lead.status else 0.0
+        self.dash_lane = self.lane_path_fitter.update(self.model, CS.out.vEgo, lead_distance)
+        mux = lane_path.MUX_CYCLE[(self.frame // 2) % len(lane_path.MUX_CYCLE)]
+        offsets = lane_path.canfd_lane_offsets(self.dash_lane)
+        can_sends.append(lane_path.create_lane_path(self.packer, self.CAN.lkas, offsets, mux))
+        can_sends.append(hud_objects.create_hud_object(self.packer, self.CAN.lkas, mux, self.cluster_lead))
+
+      if self.frame % 10 == 0:
+        can_sends.append(hondacan.create_radar_hud_canfd(self.packer, self.CAN.pt, CC.enabled))
+      if self.frame % 20 == 0:
+        can_sends.extend(hondacan.create_canfd_radar_lead_messages(
+          self.packer, self.CAN.pt, CS.radar_ref_counter, CS.radar_target_speed,
+          lane_path.canfd_lane_length(self.dash_lane),
+        ))
+      if self.frame % 100 == 0:
+        can_sends.append(hondacan.create_canfd_supplemental(self.packer, self.CAN.pt))
 
     # Send steering command.
     can_sends.append(hondacan.create_steering_control(self.packer, self.CAN, apply_torque, CC.latActive, self.tja_control))
@@ -392,9 +430,19 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
       steering_available = CS.out.cruiseState.available and CS.out.vEgo > max(self.params.STEER_GLOBAL_MIN_SPEED, self.CP.minSteerSpeed)
       reduced_steering = CS.out.steeringPressed
       steer_maxed = abs(apply_torque) >= self.params.STEER_MAX
+      lkas_state_change = None
+      if accord_cluster_visualization:
+        hud_key = (
+          bool(hud_control.lanesVisible),
+          bool(CC.latActive),
+          bool(alert_steer_required),
+          bool(CS.out.steerFaultPermanent),
+        )
+        lkas_state_change = self.lkas_state_change_pulse.update(hud_key)
+
       can_sends.extend(hondacan.create_lkas_hud(self.packer, self.CAN.lkas, self.CP, hud_control, CC.latActive,
                                                 steering_available, reduced_steering, alert_steer_required, CS.lkas_hud, self.dashed_lanes,
-                                                steer_maxed))
+                                                steer_maxed, lkas_state_change=lkas_state_change))
 
       if self.CP.openpilotLongitudinalControl:
         # TODO: combining with create_acc_hud block above will change message order and will need replay logs regenerated

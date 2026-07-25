@@ -91,6 +91,45 @@ class TestCanChecksums(unittest.TestCase):
       assert parser.vl['LKAS_HUD']['CHECKSUM'] == std
       assert parser.vl['LKAS_HUD_A']['CHECKSUM'] == ext
 
+  def test_honda_accord_canfd_cluster_checksums(self):
+    """Known-good frames captured from the stock radar on the user's Accord 11G."""
+    dbc_file = "honda_common_canfd_generated"
+    captures = {
+      ("RADAR_HUD_CANFD", 0x310): [
+        bytes.fromhex("000800000000011a"), bytes.fromhex("0008000000000129"),
+        bytes.fromhex("0008000000000138"), bytes.fromhex("000800000000010b"),
+        bytes.fromhex("0008000000008130"), bytes.fromhex("0008000000008103"),
+        bytes.fromhex("0008000000008112"), bytes.fromhex("0008000000008121"),
+      ],
+      ("LANE_PATH", 0x6CD5558): [
+        bytes.fromhex("107ff7ff7ff7ff25"), bytes.fromhex("147ff7ff7ff7ff30"),
+        bytes.fromhex("187ff7ff7ff7ff0f"), bytes.fromhex("1c7ff7ff7ff7ff1a"),
+        bytes.fromhex("0400300300300438"), bytes.fromhex("0800400400400404"),
+        bytes.fromhex("0c0040040040041f"), bytes.fromhex("1000500500600623"),
+      ],
+      ("HUD_OBJECTS", 0x6CD5559): [
+        bytes.fromhex("1000f080ffc7ff22"), bytes.fromhex("1400f080ffc7ff3d"),
+        bytes.fromhex("1800f080ffc7ff0c"), bytes.fromhex("1c00f080ffc7ff17"),
+        bytes.fromhex("0420920070800434"), bytes.fromhex("4420920070000717"),
+        bytes.fromhex("842092006f800939"), bytes.fromhex("c42092006f000b1d"),
+      ],
+      ("RADAR_LEAD", 0xF31AA5C): [
+        bytes.fromhex("6078001800000039"), bytes.fromhex("a078001800000008"),
+        bytes.fromhex("e078001800000013"), bytes.fromhex("207800180000002e"),
+      ],
+      ("RADAR_LEAD2", 0xF31AA52): [
+        bytes.fromhex("8878000000000032"), bytes.fromhex("8878000000000005"),
+        bytes.fromhex("8878000000000014"), bytes.fromhex("8878000000000023"),
+      ],
+      ("BOSCH_SUPPLEMENTAL_CANFD", 0x1A45AA4E): [
+        bytes.fromhex("010041000000003f"), bytes.fromhex("0100410000000002"),
+        bytes.fromhex("0100410000000011"), bytes.fromhex("0100410000000020"),
+      ],
+    }
+    for (message, address), frames in captures.items():
+      with self.subTest(message=message):
+        self.verify_checksum(dbc_file, message, address, frames)
+
   def verify_volkswagen_mqb_crc(self, msg_name: str, msg_addr: int, test_messages: list[bytes], counter_field: str = 'COUNTER'):
     """Test AUTOSAR E2E Profile 2 CRCs"""
     assert len(test_messages) == 16  # All counter values must be tested

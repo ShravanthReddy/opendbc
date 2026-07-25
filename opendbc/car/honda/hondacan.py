@@ -173,12 +173,12 @@ def create_acc_hud(packer, bus, CP, enabled, pcm_speed, pcm_accel, hud_control, 
 
 
 def create_lkas_hud(packer, bus, CP, hud_control, lat_active, steering_available, reduced_steering, alert_steer_required, lkas_hud, dashed_lanes,
-                    steer_maxed):
+                    steer_maxed, lkas_state_change=None):
   commands = []
 
   lkas_hud_values = {
     'LKAS_READY': 1,
-    'LKAS_STATE_CHANGE': 1,
+    'LKAS_STATE_CHANGE': 1 if lkas_state_change is None else int(lkas_state_change),
     'STEERING_REQUIRED': alert_steer_required,
     'SOLID_LANES': lat_active,
     'DASHED_LANES': dashed_lanes,
@@ -222,6 +222,40 @@ def create_radar_hud(packer, bus):
   return packer.make_can_msg('RADAR_HUD', bus, radar_hud_values)
 
 
+def create_radar_hud_canfd(packer, bus, enabled):
+  values = {
+    # Stock Accord captures keep this low with ACC both active and inactive.
+    'CMBS_ENABLED_MAYBE': 0,
+    'ACC_ON': int(enabled),
+    'SET_ME_X01': 1,
+    'SET_ME_X01_2': 1,
+  }
+  return packer.make_can_msg("RADAR_HUD_CANFD", bus, values)
+
+
+def create_canfd_supplemental(packer, bus):
+  return packer.make_can_msg("BOSCH_SUPPLEMENTAL_CANFD", bus, {
+    'SET_ME_X01': 0x01,
+    'SET_ME_X41': 0x41,
+  })
+
+
+def create_canfd_radar_lead_messages(packer, bus, counter_reference, target_speed, lane_path_length):
+  # Constants and cadence match the Accord 11G stock-radar startup capture.
+  radar_lead = packer.make_can_msg("RADAR_LEAD", bus, {
+    'CNTR_REF': counter_reference,
+    'SET_ME_X01': 1,
+    'TARGET_SPEED_MAYBE': target_speed,
+    'LANE_PATH_LENGTH': lane_path_length,
+  })
+  radar_lead_2 = packer.make_can_msg("RADAR_LEAD2", bus, {
+    'SET_ME_X88': 136,
+    'SET_ME_X78': 120,
+    'LEAD_DISTANCE_MAYBE': 0,
+  })
+  return [radar_lead, radar_lead_2]
+
+
 def create_legacy_brake_command(packer, bus):
   return packer.make_can_msg("LEGACY_BRAKE_COMMAND", bus, {})
 
@@ -239,6 +273,7 @@ def spam_buttons_command(packer, CAN, button_val, car_fingerprint):
 def honda_checksum(address: int, sig, d: bytearray) -> int:
   s = 0
   extended = address > 0x7FF
+  high_extended = address > 0x100000
   addr = address
   while addr:
     s += addr & 0xF
@@ -250,5 +285,7 @@ def honda_checksum(address: int, sig, d: bytearray) -> int:
     s += (x & 0xF) + (x >> 4)
   s = 8 - s
   if extended:
-    s += 3
+    # Verified against stock Accord 11G captures. Honda uses a different
+    # checksum adjustment for the high 29-bit address range.
+    s += 10 if high_extended else 3
   return s & 0xF

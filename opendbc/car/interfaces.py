@@ -115,9 +115,11 @@ class CarInterfaceBase(ABC, CarInterfaceBaseSP):
     dbc_names = {bus: cp.dbc_name for bus, cp in self.can_parsers.items()}
     self.CC: CarControllerBase = self.CarController(dbc_names, CP, CP_SP)
 
-  def apply(self, c: structs.CarControl, c_sp: structs.CarControlSP, now_nanos: int | None = None) -> tuple[structs.CarControl.Actuators, list[CanData]]:
+  def apply(self, c: structs.CarControl, c_sp: structs.CarControlSP, now_nanos: int | None = None,
+            model=None) -> tuple[structs.CarControl.Actuators, list[CanData]]:
     if now_nanos is None:
       now_nanos = int(time.monotonic() * 1e9)
+    self.CC.model = model
     return self.CC.update(c, c_sp, self.CS, now_nanos)
 
   @staticmethod
@@ -404,6 +406,7 @@ class CarControllerBase(ABC):
     self.CP = CP
     self.CP_SP = CP_SP
     self.frame = 0
+    self.model = None
     self.secoc_key: bytes = b"00" * 16
 
   @abstractmethod

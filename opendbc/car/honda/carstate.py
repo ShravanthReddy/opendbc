@@ -57,6 +57,8 @@ class CarState(CarStateBase, CarStateExt):
 
     self.initial_accFault_cleared = False
     self.initial_accFault_cleared_timer = int(10 / DT_CTRL) # 10 seconds after startup for initial faults to clear
+    self.radar_ref_counter = 0
+    self.radar_target_speed = 120
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
@@ -244,6 +246,11 @@ class CarState(CarStateBase, CarStateExt):
       self.stock_brake = cp_cam.vl["BRAKE_COMMAND"]
     if self.CP.carFingerprint in (HONDA_BOSCH_RADARLESS | HONDA_BOSCH_CANFD):
       self.lkas_hud = cp_cam.vl["LKAS_HUD"]
+    if self.CP.carFingerprint in HONDA_BOSCH_CANFD:
+      self.radar_ref_counter = int(cp.vl["RADAR_REFERENCE"]["COUNTER"])
+      stock_target_speed = int(cp.vl["RADAR_LEAD"]["TARGET_SPEED_MAYBE"])
+      if stock_target_speed > 0:
+        self.radar_target_speed = stock_target_speed
 
     if self.CP.enableBsm:
       # BSM messages are on B-CAN, requires a panda forwarding B-CAN messages to CAN 0
@@ -261,8 +268,12 @@ class CarState(CarStateBase, CarStateExt):
     return ret, ret_sp
 
   def get_can_parsers(self, CP, CP_SP):
+    pt_messages = [("RADAR_LEAD", float('nan'))] if CP.carFingerprint in HONDA_BOSCH_CANFD else []
     parsers = {
-      Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).pt),
+      # RADAR_LEAD is sampled during the startup handoff only. Registering it
+      # at NaN frequency keeps its last value without making radar shutdown
+      # invalidate the powertrain parser.
+      Bus.pt: CANParser(DBC[CP.carFingerprint][Bus.pt], pt_messages, CanBus(CP).pt),
       Bus.cam: CANParser(DBC[CP.carFingerprint][Bus.pt], [], CanBus(CP).camera),
     }
     if CP.enableBsm:
