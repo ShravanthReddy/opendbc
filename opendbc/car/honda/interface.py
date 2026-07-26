@@ -297,6 +297,8 @@ class CarInterface(CarInterfaceBase):
       ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.RADARLESS.value
     if candidate in HONDA_BOSCH_CANFD:
       ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.BOSCH_CANFD.value
+    if candidate == CAR.HONDA_ACCORD_11G:
+      ret.safetyConfigs[-1].safetyParam |= HondaSafetyFlags.ACCORD_11G.value
 
     # min speed to enable ACC. if car can do stop and go, then set enabling speed
     # to a negative value, so it won't matter. Otherwise, add 0.5 mph margin to not
@@ -435,6 +437,13 @@ class CarInterface(CarInterfaceBase):
   @staticmethod
   def init(CP, CP_SP, can_recv, can_send, communication_control=None):
     if CP.carFingerprint in (HONDA_BOSCH - HONDA_BOSCH_RADARLESS) and CP.openpilotLongitudinalControl:
+      if communication_control is None and CP.carFingerprint == CAR.HONDA_ACCORD_11G:
+        # On Accord 11G, CarController silences the radar only after panda has
+        # opened the harness relay. Disabling it here races the later Honda
+        # safety-mode switch and can leave VSA without ACC_CONTROL long enough
+        # to latch CRUISE_FAULT for the drive.
+        return
+
       # 0x80 silences response
       if communication_control is None:
         communication_control = bytes([uds.SERVICE_TYPE.COMMUNICATION_CONTROL, 0x80 | uds.CONTROL_TYPE.DISABLE_RX_DISABLE_TX,
@@ -445,4 +454,4 @@ class CarInterface(CarInterfaceBase):
   def deinit(CP, can_recv, can_send):
     communication_control = bytes([uds.SERVICE_TYPE.COMMUNICATION_CONTROL, 0x80 | uds.CONTROL_TYPE.ENABLE_RX_ENABLE_TX,
                                    uds.MESSAGE_TYPE.NORMAL_AND_NETWORK_MANAGEMENT])
-    CarInterface.init(CP, can_recv, can_send, communication_control)
+    CarInterface.init(CP, None, can_recv, can_send, communication_control)

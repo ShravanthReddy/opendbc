@@ -59,6 +59,39 @@ class CarState(CarStateBase, CarStateExt):
     self.initial_accFault_cleared_timer = int(10 / DT_CTRL) # 10 seconds after startup for initial faults to clear
     self.radar_ref_counter = 0
     self.radar_target_speed = 120
+    self.scm_ambient_light = 0
+
+    # Accord 11G relay-aware radar handoff. Both sources start fail-closed:
+    # replacement ACC/display frames are withheld until the stock radar has
+    # first been observed and then gone silent after a confirmed relay opening.
+    self.stock_acc_seen = False
+    self.stock_acc_silent_frames = 0
+    self.stock_acc_alive = True
+    self.camera_steer_seen = False
+    self.camera_steer_silent_frames = 0
+    self.canfd_relay_open = False
+
+  def _update_accord_radar_handoff(self, cp):
+    # ACC_CONTROL is emitted by the stock radar at 50 Hz. Do not declare it
+    # silent until it has first been observed, then missed for four control
+    # cycles. This prevents an overlap between stock and replacement control.
+    if cp.vl_all.get("ACC_CONTROL", {}).get("COUNTER", []):
+      self.stock_acc_seen = True
+      self.stock_acc_silent_frames = 0
+    elif self.stock_acc_seen:
+      self.stock_acc_silent_frames += 1
+    self.stock_acc_alive = not (self.stock_acc_seen and self.stock_acc_silent_frames >= 4)
+
+    # With the relay closed, camera STEERING_CONTROL is physically visible
+    # on the powertrain bus. A confirmed disappearance means the relay has
+    # opened. There is deliberately no time-based fallback: if this evidence
+    # is missing, the radar remains enabled and openpilot does not take over.
+    if cp.vl_all.get("STEERING_CONTROL", {}).get("COUNTER", []):
+      self.camera_steer_seen = True
+      self.camera_steer_silent_frames = 0
+    elif self.camera_steer_seen:
+      self.camera_steer_silent_frames += 1
+    self.canfd_relay_open = self.camera_steer_seen and self.camera_steer_silent_frames >= 5
 
   def update(self, can_parsers) -> tuple[structs.CarState, structs.CarStateSP]:
     cp = can_parsers[Bus.pt]
@@ -78,6 +111,8 @@ class CarState(CarStateBase, CarStateExt):
     prev_cruise_setting = self.cruise_setting
     self.cruise_setting = cp.vl["SCM_BUTTONS"]["CRUISE_SETTING"]
     self.cruise_buttons = cp.vl["SCM_BUTTONS"]["CRUISE_BUTTONS"]
+    if self.CP.carFingerprint == CAR.HONDA_ACCORD_11G:
+      self.scm_ambient_light = int(cp.vl["SCM_BUTTONS"]["AMBIENT_LIGHT_MAYBE"])
 
     # used for car hud message
     # TODO: find CAR_SPEED for HONDA_ODYSSEY_TWN or use ACC_HUD w/ detection
@@ -252,6 +287,9 @@ class CarState(CarStateBase, CarStateExt):
       if stock_target_speed > 0:
         self.radar_target_speed = stock_target_speed
 
+    if self.CP.carFingerprint == CAR.HONDA_ACCORD_11G and self.CP.openpilotLongitudinalControl:
+      self._update_accord_radar_handoff(cp)
+
     if self.CP.enableBsm:
       # BSM messages are on B-CAN, requires a panda forwarding B-CAN messages to CAN 0
       # more info here: https://github.com/commaai/openpilot/pull/1867
@@ -268,7 +306,13 @@ class CarState(CarStateBase, CarStateExt):
     return ret, ret_sp
 
   def get_can_parsers(self, CP, CP_SP):
-    pt_messages = [("RADAR_LEAD", float('nan'))] if CP.carFingerprint in HONDA_BOSCH_CANFD else []
+    pt_messages = []
+    if CP.carFingerprint in HONDA_BOSCH_CANFD:
+      pt_messages.append(("RADAR_LEAD", float('nan')))
+    if CP.carFingerprint == CAR.HONDA_ACCORD_11G:
+      # These messages intentionally disappear during the handoff. NaN
+      # frequency avoids making their expected silence invalidate the parser.
+      pt_messages += [("ACC_CONTROL", float('nan')), ("STEERING_CONTROL", float('nan'))]
     parsers = {
       # RADAR_LEAD is sampled during the startup handoff only. Registering it
       # at NaN frequency keeps its last value without making radar shutdown

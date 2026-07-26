@@ -263,13 +263,17 @@ def create_legacy_brake_command(packer, bus):
   return packer.make_can_msg("LEGACY_BRAKE_COMMAND", bus, {})
 
 
-def spam_buttons_command(packer, CAN, button_val, car_fingerprint):
+def spam_buttons_command(packer, CAN, cruise_button, car_fingerprint, cruise_setting=0, ambient_light=0, bus=None):
   values = {
-    'CRUISE_BUTTONS': button_val,
-    'CRUISE_SETTING': 0,
+    'CRUISE_BUTTONS': cruise_button,
+    'CRUISE_SETTING': cruise_setting,
+    # The camera consumes this live SCM byte for adaptive high beams. Preserve
+    # it whenever openpilot temporarily authors SCM_BUTTONS in the SCM's place.
+    'AMBIENT_LIGHT_MAYBE': ambient_light,
   }
-  # send buttons to camera on radarless (camera does ACC) cars
-  bus = CAN.camera if car_fingerprint in HONDA_BOSCH_RADARLESS else CAN.pt
+  if bus is None:
+    # send buttons to camera on radarless (camera does ACC) cars
+    bus = CAN.camera if car_fingerprint in HONDA_BOSCH_RADARLESS else CAN.pt
   return packer.make_can_msg("SCM_BUTTONS", bus, values)
 
 

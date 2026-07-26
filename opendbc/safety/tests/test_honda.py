@@ -696,13 +696,48 @@ class TestHondaBoschCANFDSafetyBase(TestHondaBoschSafetyBase):
   STEER_BUS = 0
   BUTTONS_BUS = 0
 
-  TX_MSGS = [[0xE4, 0], [0x296, 0], [0x33D, 0]]
+  TX_MSGS = [[0xE4, 0], [0x296, 0], [0x296, 2], [0x33D, 0]]
   FWD_BLACKLISTED_ADDRS = {2: [0xE4, 0x33D]}
   RELAY_MALFUNCTION_ADDRS = {0: (0xE4, 0x33D)}
 
   def setUp(self):
     self.packer = CANPackerSafety("honda_common_canfd_generated")
     self.safety = libsafety_py.libsafety
+
+  def test_buttons_fwd_fails_safe(self):
+    # Physical SCM_BUTTONS keeps forwarding until a valid replacement is
+    # actually transmitted to the camera.
+    self.safety.set_controls_allowed(True)
+    self.assertEqual(2, self.safety.safety_fwd_hook(0, 0x296))
+
+    self.assertTrue(self._tx(self._button_msg(Btn.NONE, bus=2)))
+    self.assertEqual(-1, self.safety.safety_fwd_hook(0, 0x296))
+
+    # Disengagement always restores stock forwarding.
+    self.safety.set_controls_allowed(False)
+    self.assertEqual(2, self.safety.safety_fwd_hook(0, 0x296))
+
+    # If the replacement stream stops, ten physical frames expire freshness.
+    self.safety.set_controls_allowed(True)
+    self.assertEqual(-1, self.safety.safety_fwd_hook(0, 0x296))
+    for _ in range(10):
+      self._rx(self._button_msg(Btn.NONE, main_on=True))
+    self.assertEqual(2, self.safety.safety_fwd_hook(0, 0x296))
+
+  def test_buttons_tx_camera_bus(self):
+    # Camera-bus buttons remain cancel-only while controls are disallowed.
+    self.safety.set_controls_allowed(False)
+    self.assertTrue(self._tx(self._button_msg(Btn.CANCEL, bus=2)))
+    self.assertFalse(self._tx(self._button_msg(Btn.RESUME, bus=2)))
+    self.assertFalse(self._tx(self._button_msg(Btn.SET, bus=2)))
+    self.safety.set_controls_allowed(True)
+    self.assertTrue(self._tx(self._button_msg(Btn.NONE, bus=2)))
+    self.assertTrue(self._tx(self._button_msg(Btn.RESUME, bus=2)))
+
+  def test_radar_diag_response_not_forwarded(self):
+    for controls_allowed in (False, True):
+      self.safety.set_controls_allowed(controls_allowed)
+      self.assertEqual(-1, self.safety.safety_fwd_hook(0, 0x18DAF1B0))
 
 
 class TestHondaBoschCANFDSafety(HondaPcmEnableBase, TestHondaBoschCANFDSafetyBase):
@@ -736,7 +771,7 @@ class TestHondaBoschCANFDLongSafety(TestHondaBoschLongSafety, TestHondaBoschCANF
   STEER_BUS = 0
   BUTTONS_BUS = 0
 
-  TX_MSGS = [[0xE4, 0], [0x1DF, 0], [0x1EF, 0], [0x30C, 0], [0x33D, 0], [0x39F, 0], [0x18DAB0F1, 0],
+  TX_MSGS = [[0xE4, 0], [0x1DF, 0], [0x1EF, 0], [0x30C, 0], [0x33D, 0], [0x296, 2], [0x39F, 0], [0x18DAB0F1, 0],
              [0x310, 0], [0x6CD5558, 0], [0x6CD5559, 0], [0xF31AA52, 0], [0xF31AA5C, 0], [0x1A45AA4E, 0],
              [0x310, 2], [0x6CD5558, 2], [0x6CD5559, 2], [0xF31AA52, 2], [0xF31AA5C, 2], [0x1A45AA4E, 2]]
   FWD_BLACKLISTED_ADDRS = {
@@ -750,7 +785,8 @@ class TestHondaBoschCANFDLongSafety(TestHondaBoschLongSafety, TestHondaBoschCANF
 
   def setUp(self):
     super().setUp()
-    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaBosch, HondaSafetyFlags.BOSCH_CANFD | HondaSafetyFlags.BOSCH_LONG)
+    self.safety.set_safety_hooks(CarParams.SafetyModel.hondaBosch,
+                                 HondaSafetyFlags.BOSCH_CANFD | HondaSafetyFlags.BOSCH_LONG | HondaSafetyFlags.ACCORD_11G)
     self.safety.init_tests()
 
   def test_cluster_visualization_addresses_are_mirrored_eight_bytes_only(self):
@@ -766,6 +802,41 @@ class TestHondaBoschCANFDLongSafety(TestHondaBoschLongSafety, TestHondaBoschCANF
       for length in (12, 16, 20, 24, 32, 48, 64):
         for bus in (0, 2):
           self.assertFalse(self._tx(common.make_msg(bus, address, length)), (hex(address), bus, length))
+
+  def test_relay_aware_radar_diagnostics(self):
+    tester_present = libsafety_py.make_CANPacket(
+      0x18DAB0F1, self.PT_BUS, b"\x02\x3E\x80\x00\x00\x00\x00\x00",
+    )
+    ext_diag = libsafety_py.make_CANPacket(
+      0x18DAB0F1, self.PT_BUS, b"\x02\x10\x03\x00\x00\x00\x00\x00",
+    )
+    comm_control_disable = libsafety_py.make_CANPacket(
+      0x18DAB0F1, self.PT_BUS, b"\x03\x28\x83\x03\x00\x00\x00\x00",
+    )
+    self.assertTrue(self._tx(tester_present))
+    self.assertTrue(self._tx(ext_diag))
+    self.assertTrue(self._tx(comm_control_disable))
+
+    # Re-enable, arbitrary diagnostics, and altered trailing bytes stay blocked.
+    blocked_payloads = (
+      b"\x03\x28\x80\x03\x00\x00\x00\x00",
+      b"\x03\xAA\xAA\x00\x00\x00\x00\x00",
+      b"\x02\x10\x03\x00\x00\x00\x00\x01",
+    )
+    for payload in blocked_payloads:
+      self.assertFalse(self._tx(libsafety_py.make_CANPacket(0x18DAB0F1, self.PT_BUS, payload)))
+
+  def test_non_accord_canfd_cannot_disable_radar(self):
+    self.safety.set_safety_hooks(
+      CarParams.SafetyModel.hondaBosch,
+      HondaSafetyFlags.BOSCH_CANFD | HondaSafetyFlags.BOSCH_LONG,
+    )
+    self.safety.init_tests()
+    for payload in (
+      b"\x02\x10\x03\x00\x00\x00\x00\x00",
+      b"\x03\x28\x83\x03\x00\x00\x00\x00",
+    ):
+      self.assertFalse(self._tx(libsafety_py.make_CANPacket(0x18DAB0F1, self.PT_BUS, payload)))
 
 
 class TestHondaNidecHybridSafety(TestHondaNidecPcmSafety):

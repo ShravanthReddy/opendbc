@@ -9,7 +9,7 @@ from opendbc.can import CANPacker
 from opendbc.car import ACCELERATION_DUE_TO_GRAVITY, Bus, DT_CTRL, rate_limit, make_tester_present_msg, structs
 from opendbc.car.honda import hondacan
 from opendbc.car.honda import hud_objects, lane_path
-from opendbc.car.honda.values import CAR, CruiseButtons, HONDA_BOSCH, HONDA_BOSCH_CANFD, HONDA_BOSCH_RADARLESS, \
+from opendbc.car.honda.values import CAR, CruiseButtons, CruiseSettings, HONDA_BOSCH, HONDA_BOSCH_CANFD, HONDA_BOSCH_RADARLESS, \
                                      HONDA_BOSCH_TJA_CONTROL, HONDA_NIDEC_ALT_PCM_ACCEL, CarControllerParams, HondaFlags
 from opendbc.car.interfaces import CarControllerBase
 from opendbc.car.common.pid import PIDController
@@ -157,6 +157,9 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     self.last_targetaccel = 0.0
     self.last_torque = 0.0
     self.bosch_last_gas = 0
+    self.radar_disable_counter = 0
+    self.lkas_button_send_remaining = 0
+    self.last_lkas_button_frame = 0
 
     self.gasfactor = 1.0 if (Params().get("HondaGasFactorParams") is None) else Params().get("HondaGasFactorParams")
     self.windfactor = 1.0 if (Params().get("HondaWindFactorParams") is None) else Params().get("HondaWindFactorParams")
@@ -238,13 +241,32 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
       and self.CP.carFingerprint == CAR.HONDA_ACCORD_11G
       and self.CP.openpilotLongitudinalControl
     )
+    accord_radar_handoff_complete = (
+      self.CP.carFingerprint == CAR.HONDA_ACCORD_11G
+      and CS.canfd_relay_open
+      and not CS.stock_acc_alive
+    )
 
-    # tester present - w/ no response (keeps radar disabled)
+    # Accord 11G: silence the radar only after the harness relay is confirmed
+    # open. Stock ACC_CONTROL remains authoritative until the radar disappears,
+    # then openpilot starts its replacement stream within a few control frames.
     if self.CP.carFingerprint in (HONDA_BOSCH - HONDA_BOSCH_RADARLESS) and self.CP.openpilotLongitudinalControl:
-      if self.frame % 10 == 0:
+      if self.CP.carFingerprint == CAR.HONDA_ACCORD_11G and CS.stock_acc_alive:
+        if CS.canfd_relay_open:
+          if self.radar_disable_counter % 50 == 0:
+            # Extended diagnostic session.
+            can_sends.append((0x18DAB0F1, b'\x02\x10\x03\x00\x00\x00\x00\x00', self.CAN.pt))
+          elif self.radar_disable_counter % 50 == 5:
+            # Suppressed-response CommunicationControl disableRxAndTx.
+            can_sends.append((0x18DAB0F1, b'\x03\x28\x83\x03\x00\x00\x00\x00', self.CAN.pt))
+          self.radar_disable_counter += 1
+      elif self.frame % 10 == 0 and (
+          self.CP.carFingerprint != CAR.HONDA_ACCORD_11G or accord_radar_handoff_complete
+      ):
+        # tester present - w/ no response (keeps radar disabled)
         can_sends.append(make_tester_present_msg(0x18DAB0F1, self.CAN.pt, suppress_response=True))
 
-    if accord_cluster_visualization:
+    if accord_cluster_visualization and accord_radar_handoff_complete:
       # Stock captures contain byte-identical copies of these radar display
       # frames on both sides of the harness relay. With the relay open for
       # openpilot longitudinal, a transmission is not forwarded across it, so
@@ -326,9 +348,15 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
         can_sends.append(hondacan.create_bosch_supplemental_1(self.packer, self.CAN))
       # If using stock ACC, spam cancel command to kill gas when OP disengages.
       if pcm_cancel_cmd:
-        can_sends.append(hondacan.spam_buttons_command(self.packer, self.CAN, CruiseButtons.CANCEL, self.CP.carFingerprint))
+        can_sends.append(hondacan.spam_buttons_command(
+          self.packer, self.CAN, CruiseButtons.CANCEL, self.CP.carFingerprint,
+          ambient_light=CS.scm_ambient_light,
+        ))
       elif CC.cruiseControl.resume:
-        can_sends.append(hondacan.spam_buttons_command(self.packer, self.CAN, CruiseButtons.RES_ACCEL, self.CP.carFingerprint))
+        can_sends.append(hondacan.spam_buttons_command(
+          self.packer, self.CAN, CruiseButtons.RES_ACCEL, self.CP.carFingerprint,
+          ambient_light=CS.scm_ambient_light,
+        ))
 
     else:
       # Send gas and brake commands.
@@ -398,8 +426,11 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
 
           stopping = actuators.longControlState == LongCtrlState.stopping
           self.stopping_counter = self.stopping_counter + 1 if stopping else 0
-          can_sends.extend(hondacan.create_acc_commands(self.packer, self.CAN, CC.enabled, CC.longActive, self.accel, self.gas,
-                                                        self.stopping_counter, self.CP.carFingerprint, gas_pedal_force))
+          # Never overlap the stock radar's ACC_CONTROL stream during the
+          # relay-aware handoff on Accord 11G.
+          if self.CP.carFingerprint != CAR.HONDA_ACCORD_11G or accord_radar_handoff_complete:
+            can_sends.extend(hondacan.create_acc_commands(self.packer, self.CAN, CC.enabled, CC.longActive, self.accel, self.gas,
+                                                          self.stopping_counter, self.CP.carFingerprint, gas_pedal_force))
         else:
           apply_brake = np.clip(self.brake_last - wind_brake, 0.0, 1.0)
           apply_brake = int(np.clip(apply_brake * self.params.NIDEC_BRAKE_MAX, 0, self.params.NIDEC_BRAKE_MAX - 1))
@@ -433,7 +464,9 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
         if (accel >= 0.01) and (CS.out.vEgo < 4.0) and (pcm_speed < 25.0 / 3.6):
           pcm_speed = 25.0 / 3.6
 
-      if self.CP.openpilotLongitudinalControl:
+      if self.CP.openpilotLongitudinalControl and (
+          self.CP.carFingerprint != CAR.HONDA_ACCORD_11G or accord_radar_handoff_complete
+      ):
         # On Nidec, this also controls longitudinal positive acceleration
         can_sends.append(hondacan.create_acc_hud(self.packer, self.CAN.pt, self.CP, CC.enabled, pcm_speed, pcm_accel,
                                                  hud_control, hud_v_cruise, CS.is_metric, CS.acc_hud, speed_control))
@@ -465,6 +498,32 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
           self.speed = pcm_speed
           if not self.CP_SP.enableGasInterceptor:
             self.gas = pcm_accel / self.params.NIDEC_GAS_MAX
+
+    # Accord 11G cluster visualization leaves stock LKAS active enough for its
+    # hands-off timer to cancel ACC. While openpilot lateral is actually active,
+    # briefly press LKAS toward the camera to turn stock LKAS off, and replace
+    # SCM_BUTTONS at 25 Hz so the driver's LKAS press does not restart it.
+    # Panda only blocks the physical SCM message while this replacement stream
+    # remains fresh, and the live ambient-light byte is preserved.
+    if accord_cluster_visualization and accord_radar_handoff_complete and CC.enabled and CC.latActive and self.frame % 4 == 0 and \
+        not pcm_cancel_cmd and not CC.cruiseControl.resume:
+      if self.lkas_button_send_remaining == 0 and CS.lkas_hud["LKAS_READY"] and \
+          self.frame >= self.last_lkas_button_frame + 500:
+        self.lkas_button_send_remaining = 3
+
+      if self.lkas_button_send_remaining > 0:
+        self.last_lkas_button_frame = self.frame
+        self.lkas_button_send_remaining -= 1
+        cruise_setting = CruiseSettings.LKAS
+      elif CS.cruise_setting == CruiseSettings.LKAS:
+        cruise_setting = 0
+      else:
+        cruise_setting = CS.cruise_setting
+
+      can_sends.append(hondacan.spam_buttons_command(
+        self.packer, self.CAN, CS.cruise_buttons, self.CP.carFingerprint,
+        cruise_setting=cruise_setting, ambient_light=CS.scm_ambient_light, bus=self.CAN.camera,
+      ))
 
     # Intelligent Cruise Button Management
     can_sends.extend(IntelligentCruiseButtonManagementInterface.update(self, CC_SP, self.packer, self.frame,

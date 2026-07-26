@@ -45,8 +45,13 @@ static bool honda_fwd_brake = false;
 static bool honda_bosch_long = false;
 static bool honda_bosch_radarless = false;
 static bool honda_bosch_canfd = false;
+static bool honda_accord_11g = false;
 static bool honda_nidec_hybrid = false;
 static bool honda_stock_longitudinal = false;
+// Refreshed by each valid openpilot SCM_BUTTONS transmission to the camera
+// and decayed by physical SCM button frames. Forwarding fails safe to stock
+// within about 0.4 s if the replacement stream stops.
+static int honda_op_buttons_fresh = 0;
 typedef enum {HONDA_NIDEC, HONDA_BOSCH} HondaHw;
 static HondaHw honda_hw = HONDA_NIDEC;
 
@@ -134,6 +139,10 @@ static void honda_rx_hook(const CANPacket_t *msg) {
   // state machine to enter and exit controls for button enabling
   // 0x1A6 for the ILX, 0x296 for the Civic Touring
   if (((msg->addr == 0x1A6U) || (msg->addr == 0x296U)) && (msg->bus == pt_bus)) {
+    if (honda_op_buttons_fresh > 0) {
+      honda_op_buttons_fresh--;
+    }
+
     int button = (msg->data[0] & 0xE0U) >> 5;
 
     int cruise_setting = (msg->data[(msg->addr == 0x296U) ? 0U : 5U] & 0x0CU) >> 2U;
@@ -318,15 +327,30 @@ static bool honda_tx_hook(const CANPacket_t *msg) {
   // FORCE CANCEL: safety check only relevant when spamming the cancel button in Bosch HW
   // ensuring that only the cancel button press is sent (VAL 2) when controls are off.
   // This avoids unintended engagements while still allowing resume spam
-  if (((msg->addr == 0x1A6U) || (msg->addr == 0x296U)) && !controls_allowed && (msg->bus == bus_buttons)) {
+  const bool is_buttons_bus = (msg->bus == bus_buttons) ||
+                              (honda_bosch_canfd && (msg->addr == 0x296U) && (msg->bus == 2U));
+  if (((msg->addr == 0x1A6U) || (msg->addr == 0x296U)) && !controls_allowed && is_buttons_bus) {
     if (((msg->data[0] >> 5) & 0x7U) != 2U) {
       tx = false;
     }
   }
 
-  // Only tester present ("\x02\x3E\x80\x00\x00\x00\x00\x00") allowed on diagnostics address
+  // A valid replacement SCM_BUTTONS stream lets the forward hook suppress the
+  // physical copy. Refresh only after all normal TX checks have passed.
+  if (tx && (msg->addr == 0x296U) && (msg->bus == 2U)) {
+    honda_op_buttons_fresh = 10;
+  }
+
+  // Tester present is always allowed. CAN FD additionally permits only the
+  // two exact UDS requests used for the relay-aware radar shutdown.
   if (msg->addr == 0x18DAB0F1U) {
-    if ((GET_BYTES(msg, 0, 4) != 0x00803E02U) || (GET_BYTES(msg, 4, 4) != 0x0U)) {
+    const uint32_t first_bytes = GET_BYTES(msg, 0, 4);
+    bool allowed = first_bytes == 0x00803E02U;
+    if (honda_accord_11g) {
+      allowed = allowed || (first_bytes == 0x00031002U);  // 02 10 03
+      allowed = allowed || (first_bytes == 0x03832803U);  // 03 28 83 03
+    }
+    if (!allowed || (GET_BYTES(msg, 4, 4) != 0x0U)) {
       tx = false;
     }
   }
@@ -377,6 +401,8 @@ static safety_config honda_nidec_init(uint16_t param) {
   honda_bosch_long = false;
   honda_bosch_radarless = false;
   honda_bosch_canfd = false;
+  honda_accord_11g = false;
+  honda_op_buttons_fresh = 0;
 
   safety_config ret;
 
@@ -449,13 +475,15 @@ static safety_config honda_bosch_init(uint16_t param) {
   static CanMsg HONDA_RADARLESS_LONG_TX_MSGS[] = {{0xE4, 0, 5, .check_relay = true}, {0x33D, 0, 8, .check_relay = true}, {0x1C8, 0, 8, .check_relay = true},
                                                   {0x30C, 0, 8, .check_relay = true}};  // Bosch radarless w/ gas and brakes
 
-  static CanMsg HONDA_CANFD_TX_MSGS[] = {{0xE4, 0, 5, .check_relay = true}, {0x296, 0, 4, .check_relay = false}, {0x33D, 0, 8, .check_relay = true}}; // Bosch CANFD
+  static CanMsg HONDA_CANFD_TX_MSGS[] = {{0xE4, 0, 5, .check_relay = true}, {0x296, 0, 4, .check_relay = false},
+                                         {0x296, 2, 4, .check_relay = false}, {0x33D, 0, 8, .check_relay = true}}; // Bosch CANFD
 
   // Stock captures contain byte-identical copies of the extended radar display
   // messages on buses 0 and 2 while the harness relay is closed. Honda Bosch
   // longitudinal opens the relay, so authored copies must be sent on both sides.
   static CanMsg HONDA_CANFD_LONG_TX_MSGS[] = {{0xE4, 0, 5, .check_relay = true}, {0x1DF, 0, 8, .check_relay = false}, {0x1EF, 0, 8, .check_relay = false},
-                                              {0x30C, 0, 8, .check_relay = false}, {0x33D, 0, 8, .check_relay = true}, {0x18DAB0F1, 0, 8, .check_relay = false},
+                                              {0x30C, 0, 8, .check_relay = false}, {0x33D, 0, 8, .check_relay = true},
+                                              {0x296, 2, 4, .check_relay = false}, {0x18DAB0F1, 0, 8, .check_relay = false},
                                               {0x39F, 0, 8, .check_relay = false},
                                               {0x310, 0, 8, .check_relay = true},
                                               {0x6CD5558, 0, 8, .check_relay = true}, {0x6CD5559, 0, 8, .check_relay = true},
@@ -469,6 +497,7 @@ static safety_config honda_bosch_init(uint16_t param) {
   const uint16_t HONDA_PARAM_ALT_BRAKE = 1;
   const uint16_t HONDA_PARAM_RADARLESS = 8;
   const uint16_t HONDA_PARAM_BOSCH_CANFD = 16;
+  const uint16_t HONDA_PARAM_ACCORD_11G = 32;
 
   // Bosch radarless and CAN-FD have the powertrain bus on bus 0
   static RxCheck honda_bosch_pt0_rx_checks[] = {
@@ -492,8 +521,10 @@ static safety_config honda_bosch_init(uint16_t param) {
 
   honda_hw = HONDA_BOSCH;
   honda_brake_switch_prev = false;
+  honda_op_buttons_fresh = 0;
   honda_bosch_radarless = GET_FLAG(param, HONDA_PARAM_RADARLESS);
   honda_bosch_canfd = GET_FLAG(param, HONDA_PARAM_BOSCH_CANFD);
+  honda_accord_11g = GET_FLAG(param, HONDA_PARAM_ACCORD_11G);
   // Checking for alternate brake override from safety parameter
   honda_alt_brake_msg = GET_FLAG(param, HONDA_PARAM_ALT_BRAKE);
   honda_stock_longitudinal = false;
@@ -553,6 +584,26 @@ static bool honda_nidec_fwd_hook(int bus_num, int addr) {
   return block_msg;
 }
 
+static bool honda_bosch_fwd_hook(int bus_num, int addr) {
+  bool block_msg = false;
+
+  // Suppress physical SCM_BUTTONS only while openpilot is demonstrably
+  // replacing it. If controls never engage or the process dies, freshness
+  // expires and stock forwarding resumes automatically.
+  if (honda_bosch_canfd && controls_allowed && (honda_op_buttons_fresh > 0) &&
+      (bus_num == 0) && (addr == 0x296)) {
+    block_msg = true;
+  }
+
+  // The radar disable handshake happens after the relay opens; its diagnostic
+  // responses do not need to cross into the camera side.
+  if (honda_bosch_canfd && (bus_num == 0) && (addr == 0x18DAF1B0)) {
+    block_msg = true;
+  }
+
+  return block_msg;
+}
+
 const safety_hooks honda_nidec_hooks = {
   .init = honda_nidec_init,
   .rx = honda_rx_hook,
@@ -567,6 +618,7 @@ const safety_hooks honda_bosch_hooks = {
   .init = honda_bosch_init,
   .rx = honda_rx_hook,
   .tx = honda_tx_hook,
+  .fwd = honda_bosch_fwd_hook,
   .get_counter = honda_get_counter,
   .get_checksum = honda_get_checksum,
   .compute_checksum = honda_compute_checksum,

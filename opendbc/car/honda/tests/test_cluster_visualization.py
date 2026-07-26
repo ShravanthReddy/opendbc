@@ -4,7 +4,8 @@ from types import SimpleNamespace
 import numpy as np
 
 from opendbc.can import CANPacker, CANParser
-from opendbc.car.honda import hud_objects, lane_path
+from opendbc.car.honda import hondacan, hud_objects, lane_path
+from opendbc.car.honda.values import CAR, CruiseButtons, CruiseSettings
 
 
 DBC = "honda_common_canfd_generated"
@@ -253,6 +254,18 @@ class TestAccordClusterVisualization(unittest.TestCase):
     parser = CANParser(DBC, [("RADAR_LEAD", float('nan'))], 0)
     parser.update([20_000_000_000, []])
     self.assertTrue(parser.can_valid)
+
+  def test_replacement_buttons_preserve_ambient_light(self):
+    parser = CANParser(DBC, [("SCM_BUTTONS", 0)], 2)
+    can = SimpleNamespace(pt=0, camera=2)
+    msg = hondacan.spam_buttons_command(
+      self.packer, can, CruiseButtons.RES_ACCEL, CAR.HONDA_ACCORD_11G,
+      cruise_setting=CruiseSettings.LKAS, ambient_light=0x72, bus=can.camera,
+    )
+    parser.update([0, [msg]])
+    self.assertEqual(parser.vl["SCM_BUTTONS"]["CRUISE_BUTTONS"], CruiseButtons.RES_ACCEL)
+    self.assertEqual(parser.vl["SCM_BUTTONS"]["CRUISE_SETTING"], CruiseSettings.LKAS)
+    self.assertEqual(parser.vl["SCM_BUTTONS"]["AMBIENT_LIGHT_MAYBE"], 0x72)
 
 
 if __name__ == "__main__":
