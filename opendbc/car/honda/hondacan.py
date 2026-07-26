@@ -240,12 +240,15 @@ def create_canfd_supplemental(packer, bus):
   })
 
 
-def create_canfd_radar_lead_messages(packer, bus, counter_reference, target_speed, lane_path_length):
+def create_canfd_radar_lead_messages(packer, bus, counter_reference, target_speed, lane_path_length,
+                                     left_lane=0, right_lane=0):
   # Constants and cadence match the Accord 11G stock-radar startup capture.
   radar_lead = packer.make_can_msg("RADAR_LEAD", bus, {
     'CNTR_REF': counter_reference,
     'SET_ME_X01': 1,
     'TARGET_SPEED_MAYBE': target_speed,
+    'LEFT_LANE': left_lane,
+    'RIGHT_LANE': right_lane,
     'LANE_PATH_LENGTH': lane_path_length,
   })
   radar_lead_2 = packer.make_can_msg("RADAR_LEAD2", bus, {

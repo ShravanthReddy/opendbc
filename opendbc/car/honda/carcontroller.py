@@ -139,7 +139,8 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     self.cluster_visualization_enabled = False
     self.dash_lane = lane_path.blank_dash_lane()
     self.lane_path_fitter = lane_path.LanePathFitter()
-    self.cluster_lead = hud_objects.no_lead()
+    self.cluster_leads = []
+    self.cluster_lead_tracker = hud_objects.LeadObjectTracker()
     self.lkas_state_change_pulse = lane_path.LkasStateChangePulse()
 
     self.braking = False
@@ -244,27 +245,37 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
         can_sends.append(make_tester_present_msg(0x18DAB0F1, self.CAN.pt, suppress_response=True))
 
     if accord_cluster_visualization:
-      # These are the stock-radar display frames captured on this exact Accord.
-      # They are intentionally sent only on bus 0 in the first release; bus 2
-      # reaches the camera ECU and is excluded until its consumers are proven.
+      # Stock captures contain byte-identical copies of these radar display
+      # frames on both sides of the harness relay. With the relay open for
+      # openpilot longitudinal, a transmission is not forwarded across it, so
+      # pack each frame once and explicitly mirror the same bytes to both buses.
+      cluster_can_sends = []
       if self.frame % 2 == 0:
-        self.cluster_lead = hud_objects.lead_from_model(self.model)
-        lead_distance = self.cluster_lead.d_rel if self.cluster_lead.status else 0.0
+        self.cluster_leads = self.cluster_lead_tracker.update_from_model(
+          self.model, CS.out.vEgo, now_nanos / 1e9,
+        )
+        lead_distance = self.cluster_leads[0].d_rel if self.cluster_leads else 0.0
         self.dash_lane = self.lane_path_fitter.update(self.model, CS.out.vEgo, lead_distance)
         mux = lane_path.MUX_CYCLE[(self.frame // 2) % len(lane_path.MUX_CYCLE)]
         offsets = lane_path.canfd_lane_offsets(self.dash_lane)
-        can_sends.append(lane_path.create_lane_path(self.packer, self.CAN.lkas, offsets, mux))
-        can_sends.append(hud_objects.create_hud_object(self.packer, self.CAN.lkas, mux, self.cluster_lead))
+        cluster_can_sends.append(lane_path.create_lane_path(self.packer, self.CAN.pt, offsets, mux))
+        cluster_can_sends.append(hud_objects.create_hud_object(self.packer, self.CAN.pt, mux, self.cluster_leads))
 
       if self.frame % 10 == 0:
-        can_sends.append(hondacan.create_radar_hud_canfd(self.packer, self.CAN.pt, CC.enabled))
+        cluster_can_sends.append(hondacan.create_radar_hud_canfd(self.packer, self.CAN.pt, CC.enabled))
       if self.frame % 20 == 0:
-        can_sends.extend(hondacan.create_canfd_radar_lead_messages(
+        cluster_can_sends.extend(hondacan.create_canfd_radar_lead_messages(
           self.packer, self.CAN.pt, CS.radar_ref_counter, CS.radar_target_speed,
           lane_path.canfd_lane_length(self.dash_lane),
+          lane_path.LANE_LINE_ON if self.dash_lane.left_line else 0,
+          lane_path.LANE_LINE_ON if self.dash_lane.right_line else 0,
         ))
       if self.frame % 100 == 0:
-        can_sends.append(hondacan.create_canfd_supplemental(self.packer, self.CAN.pt))
+        cluster_can_sends.append(hondacan.create_canfd_supplemental(self.packer, self.CAN.pt))
+
+      for address, data, _ in cluster_can_sends:
+        can_sends.append((address, data, self.CAN.pt))
+        can_sends.append((address, data, self.CAN.camera))
 
     # Send steering command.
     can_sends.append(hondacan.create_steering_control(self.packer, self.CAN, apply_torque, CC.latActive, self.tja_control))

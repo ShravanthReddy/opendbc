@@ -51,6 +51,8 @@ BO_ 254913116 RADAR_LEAD: 8 XXX
  SG_ SET_ME_X01 : 5|1@0+ (1,0) [0|1] "" XXX
  SG_ CNTR_REF : 7|2@0+ (1,0) [0|3] "" XXX
  SG_ TARGET_SPEED_MAYBE : 15|8@0+ (1,0) [0|255] "" XXX
+ SG_ LEFT_LANE : 23|2@0+ (1,0) [0|3] "" XXX
+ SG_ RIGHT_LANE : 21|2@0+ (1,0) [0|3] "" XXX
  SG_ LANE_PATH_LENGTH : 31|6@0+ (1,0) [0|63] "" XXX
  SG_ CHECKSUM : 59|4@0+ (1,0) [0|15] "" XXX
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" XXX
@@ -62,3 +64,5 @@ BO_ 440773198 BOSCH_SUPPLEMENTAL_CANFD: 8 XXX
  SG_ COUNTER : 61|2@0+ (1,0) [0|3] "" XXX
 
 CM_ SG_ 254913116 LANE_PATH_LENGTH "Number of valid LANE_PATH points in the current sweep; observed Accord values are 6 idle and up to 30 active.";
+CM_ SG_ 254913116 LEFT_LANE "3 = left lane line detected; exact Accord captures use the same status nibble as the factory radar.";
+CM_ SG_ 254913116 RIGHT_LANE "3 = right lane line detected; exact Accord captures use the same status nibble as the factory radar.";

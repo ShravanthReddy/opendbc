@@ -17,10 +17,14 @@ CANFD_MAX_VALID_POINTS = 30
 CANFD_IDLE_OFFSETS = [0] * CANFD_MIN_VALID_POINTS + [OFFSET_UNAVAILABLE] * (NUM_POINTS - CANFD_MIN_VALID_POINTS)
 
 LOOKAHEAD = np.linspace(2.0, 100.0, NUM_POINTS)
-GAIN = 6.27 + 0.0106 * LOOKAHEAD + 0.000354 * LOOKAHEAD ** 2
+# Exact-Accord stock sweeps encode roughly 63-109 raw units per lateral
+# meter from 2-100 m lookahead. Keep the distance-dependent gain in the
+# same units as the 12-bit PATH_OFFSET signals.
+GAIN = 62.7 + 0.106 * LOOKAHEAD + 0.00354 * LOOKAHEAD ** 2
 
 PATH_PROB_ON = 0.25
 PATH_PROB_OFF = 0.10
+LANE_LINE_ON = 3
 HALF_LANE_WIDTH = 1.65
 SPEED_POINT_OFFSET = 6.75
 POINTS_PER_MS = 0.875
@@ -84,6 +88,13 @@ def encode_lane_path(x, y) -> list[int]:
   return [int(value) for value in raw]
 
 
+def ego_relative_lane_path(x, y):
+  """Translate an absolute model lane center into the cluster's fixed-ego frame."""
+  x = np.asarray(x, dtype=float)
+  y = np.asarray(y, dtype=float)
+  return y - np.interp(LOOKAHEAD[0], x, y)
+
+
 def canfd_lane_length(dash_lane: DashLane) -> int:
   if dash_lane.reach <= 0.0 or dash_lane.offsets[0] == OFFSET_UNAVAILABLE:
     return CANFD_MIN_VALID_POINTS
@@ -127,7 +138,11 @@ class LanePathFitter:
       return blank_dash_lane()
 
     x, y, self._left_on, self._right_on = selected
-    offsets = encode_lane_path(x, y)
+    # The Accord cluster keeps the ego icon fixed. LANE_PATH therefore describes
+    # the road ahead relative to ego, not the model's instantaneous absolute
+    # near-field lateral origin. Preserve curve shape while pinning the first
+    # rendered point to the car.
+    offsets = encode_lane_path(x, ego_relative_lane_path(x, y))
     if offsets[0] == OFFSET_UNAVAILABLE:
       return blank_dash_lane()
 
