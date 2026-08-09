@@ -150,8 +150,15 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
     self.bosch_last_gas = 0
 
     self.gasfactor = 1.0 if (Params().get("HondaGasFactorParams") is None) else Params().get("HondaGasFactorParams")
-    self.gasfactor_before_gasmax = self.gasfactor
     self.windfactor = 1.0 if (Params().get("HondaWindFactorParams") is None) else Params().get("HondaWindFactorParams")
+    if CP.carFingerprint == CAR.HONDA_ACCORD_11G:
+      # trust stored factors only inside a sane band: values outside it were
+      # learned chasing powertrain lag, not physics
+      if not (0.6 <= self.gasfactor <= 1.6):
+        self.gasfactor = 1.0
+      if not (0.5 <= self.windfactor <= 2.0):
+        self.windfactor = 1.0
+    self.gasfactor_before_gasmax = self.gasfactor
     self.windfactor_before_gasmax = self.windfactor_before_brake = self.windfactor
     self.pitch = 0.0
 
@@ -292,6 +299,8 @@ class CarController(CarControllerBase, MadsCarController, GasInterceptorCarContr
               if self.CP.carFingerprint in (CAR.HONDA_INSIGHT, CAR.HONDA_CIVIC_BOSCH): # gas pedal reacts too slowly
                 learn_speed = 150
               elif self.CP.carFingerprint in (CAR.ACURA_RDX_3G, CAR.ACURA_RDX_3G_MMR): # Prevent overreacting to turbo lag
+                learn_speed = 300
+              elif self.CP.carFingerprint == CAR.HONDA_ACCORD_11G: # Prevent overreacting to CVT/hybrid powertrain lag
                 learn_speed = 300
               else:
                 learn_speed = 50
